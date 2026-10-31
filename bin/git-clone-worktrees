@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
+[[ $# -ge 1 && $# -le 2 ]] || fail 'Usage: git clone-worktrees <url> [parent-directory]'
+url=$1
+parent=${2:-.}
+[[ -d "$parent" ]] || fail "Parent directory does not exist: $parent"
+parent=$(cd -- "$parent" && pwd -P)
+name=${url%/}
+name=${name##*/}
+name=${name##*:}
+name=${name%.git}
+[[ -n "$name" && "$name" != . && "$name" != .. && "$name" != -* ]] || fail 'Cannot determine a safe repository name from the URL.'
+destination="$parent/$name"
+[[ ! -e "$destination" && ! -L "$destination" ]] || fail "Destination already exists: $destination"
+staging=$(mktemp -d "$parent/.git-clone-worktrees.XXXXXXXX")
+trap 'rm -rf -- "$staging"' EXIT
+
+git clone --bare -- "$url" "$staging/.git"
+branch=$(git --git-dir="$staging/.git" symbolic-ref --quiet --short HEAD) || fail 'Remote has no default branch.'
+git --git-dir="$staging/.git" rev-parse --verify 'HEAD^{commit}' >/dev/null 2>&1 || fail 'Remote has no commits on its default branch.'
+git --git-dir="$staging/.git" config remote.origin.fetch '+refs/heads/*:refs/remotes/origin/*'
+git --git-dir="$staging/.git" fetch origin
+git --git-dir="$staging/.git" remote set-head origin --auto
+folder=${branch//\//-}
+folder=${folder//\\/-}
+git --git-dir="$staging/.git" worktree add "$staging/$folder" "$branch"
+git --git-dir="$staging/.git" config "branch.$branch.remote" origin
+git --git-dir="$staging/.git" config "branch.$branch.merge" "refs/heads/$branch"
+# -n prevents replacing a destination created concurrently.
+mv -T -n -- "$staging" "$destination"
+[[ ! -e "$staging" ]] || fail "Destination already exists: $destination"
+git --git-dir="$destination/.git" worktree repair "$destination/$folder" || fail "Worktree repair failed; inspect $destination."
+printf 'Created worktree: %s\n' "$destination/$folder"
